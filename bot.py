@@ -2,6 +2,8 @@ import logging
 import os
 import re
 import asyncio
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 import google.generativeai as genai
@@ -18,7 +20,7 @@ if not GEMINI_API_KEY or not TG_BOT_TOKEN:
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-# 初始化 Gemini 大脑 (这里完整保留了你的定制教学大纲，并使用了支持识图的 1.5-flash 模型)
+# 初始化 Gemini 大脑
 model = genai.GenerativeModel(
     model_name="gemini-1.5-flash",
     system_instruction="""
@@ -57,16 +59,13 @@ model = genai.GenerativeModel(
 """
 )
 
-# 记录用户上下文的字典
 user_chats = {}
 
 def get_or_create_chat(user_id):
-    """如果用户没有历史记录，就新建一个聊天会话；如果有，就继续聊"""
     if user_id not in user_chats:
         user_chats[user_id] = model.start_chat(history=[])
     return user_chats[user_id]
 
-# 提取泰语并发送自然语音 (Edge-TTS)
 async def send_thai_audio(update: Update, text: str):
     match = re.search(r'\[AUDIO:\s*(.*?)\s*\]', text)
     if match:
@@ -75,54 +74,41 @@ async def send_thai_audio(update: Update, text: str):
             try:
                 print(f"正在生成自然泰语语音: {thai_text}")
                 audio_file = f"tts_{update.message.from_user.id}.mp3"
-                
-                # 使用 Edge-TTS 的泰语女声，比 gTTS 柔和很多
                 communicate = edge_tts.Communicate(thai_text, "th-TH-PremwadeeNeural")
                 await communicate.save(audio_file)
-                
                 with open(audio_file, 'rb') as audio:
                     await update.message.reply_voice(voice=audio)
-                    
                 os.remove(audio_file)
             except Exception as e:
                 print(f"生成语音失败: {e}")
 
-# 处理文字消息
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user_id = update.message.from_user.id
     print(f"收到文字消息: {user_text}")
-    
     try:
         chat = get_or_create_chat(user_id)
         response = chat.send_message(user_text)
-        
         await update.message.reply_text(response.text)
         await send_thai_audio(update, response.text)
     except Exception as e:
         await update.message.reply_text("哎呀，Ajarn 的脑子卡住了，稍等一下哦...")
         print(f"文字处理报错: {e}")
 
-# 处理语音消息
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     status_msg = await update.message.reply_text("Ajarn 正在听你的发音，请稍等... 🎧")
-    
     voice_file = await update.message.voice.get_file()
     temp_ogg = f"temp_{user_id}.ogg"
     await voice_file.download_to_drive(temp_ogg)
-    
     try:
         uploaded_file = genai.upload_file(path=temp_ogg, mime_type="audio/ogg")
         prompt = "这是我的泰语发音或提问，请先识别我说了什么，然后根据你的教学大纲给出指导。记得在结尾用 [AUDIO: xxx] 给出正确的泰文发音示范。"
-        
         chat = get_or_create_chat(user_id)
         response = chat.send_message([uploaded_file, prompt])
-        
         await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=status_msg.message_id)
         await update.message.reply_text(response.text)
         await send_thai_audio(update, response.text)
-        
     except Exception as e:
         print(f"语音处理报错: {e}")
         await update.message.reply_text("哎呀，老师刚才没听清，能再说一遍吗？")
@@ -130,28 +116,20 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(temp_ogg):
             os.remove(temp_ogg)
 
-# 处理图片消息 (识图能力)
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     status_msg = await update.message.reply_text("Ajarn 正在看你发来的图片... 👀")
-    
-    # 获取最高清晰度的图片
     photo_file = await update.message.photo[-1].get_file()
     temp_jpg = f"temp_img_{user_id}.jpg"
     await photo_file.download_to_drive(temp_jpg)
-    
     try:
         uploaded_file = genai.upload_file(path=temp_jpg)
-        # 如果发图时带了文字，就用文字；没带文字就用默认指令
         caption = update.message.caption or "请看这张图片，用泰语教我图片里的物品怎么说，或者相关的实用对话。"
-        
         chat = get_or_create_chat(user_id)
         response = chat.send_message([uploaded_file, caption])
-        
         await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=status_msg.message_id)
         await update.message.reply_text(response.text)
         await send_thai_audio(update, response.text)
-        
     except Exception as e:
         print(f"图片处理报错: {e}")
         await update.message.reply_text("哎呀，这张图太模糊了，老师看不清~")
@@ -159,15 +137,36 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(temp_jpg):
             os.remove(temp_jpg)
 
+
+# ==========================================
+# 👻 新增的黑魔法：幽灵网页服务器 👻
+# ==========================================
+class GhostServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b"<h1>PThai Bot is alive!</h1>")
+
+def run_ghost_server():
+    # Render 会自动分配一个 PORT 环境变量，骗过它的关键就在这里
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), GhostServer)
+    print(f"\n👻 幽灵服务器启动成功！正在监听端口 {port}...")
+    server.serve_forever()
+# ==========================================
+
+
 if __name__ == '__main__':
-    # 调整了日志等级，避免满屏 INFO，只看报错和我们的 print
     logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.WARNING)
     
-    app = ApplicationBuilder().token(TG_BOT_TOKEN).build()
+    # 在主程序运行前，单独开一个线程跑幽灵服务器
+    threading.Thread(target=run_ghost_server, daemon=True).start()
     
+    app = ApplicationBuilder().token(TG_BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
-    print("🚀 PThai 老师 4.0 (支持上下文/识图/EdgeTTS/.env) 已上线！")
+    print("🚀 PThai 老师 4.0 (支持白嫖 Render Free 节点版) 已上线！")
     app.run_polling()
