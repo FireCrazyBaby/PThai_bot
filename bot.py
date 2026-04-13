@@ -22,7 +22,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # 初始化 Gemini 大脑
 model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
+    model_name="gemini-3-flash-preview",
     system_instruction="""
 你是我专属的泰语老师 Ajarn（อาจารย์），专门针对我的当前水平和学习目标来教学。
 
