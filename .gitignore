@@ -1,0 +1,15 @@
+# 忽略环境变量文件
+.env
+
+# 忽略 Python 缓存和虚拟环境
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+
+# 忽略生成的临时语音和图片文件
+*.mp3
+*.ogg
+*.jpg
